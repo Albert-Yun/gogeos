@@ -6,8 +6,8 @@ extern void go_callback(void* item, void* user_data);
 */
 import "C"
 import (
-	"fmt"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -20,8 +20,8 @@ func (t *STRTree) destroy() {
 	t.t = nil
 }
 
-func SortedTileRecursiveTree(size int) *STRTree {
-	csize := C.size_t(size)
+func SortedTileRecursiveTree(geom []*Geometry) *STRTree {
+	csize := C.size_t(len(geom))
 	t := cGEOSSTRtree_create(csize)
 	if t == nil {
 		return nil
@@ -31,43 +31,67 @@ func SortedTileRecursiveTree(size int) *STRTree {
 		t: t,
 	}
 
+	for i, g := range geom {
+		tree.insert(g, i)
+	}
+
 	runtime.SetFinalizer(tree, (*STRTree).destroy)
 	return tree
 }
 
-func (t *STRTree) Insert(geom *Geometry, item string) {
-	cstr := C.CString(item)
-	defer C.free(unsafe.Pointer(cstr))
-
-	cGEOSSTRtree_insert(t.t, geom.g, (*C.void)(unsafe.Pointer(cstr)))
+func (t *STRTree) insert(geom *Geometry, item int) {
+	cIdx := C.int(item)
+	cGEOSSTRtree_insert(t.t, geom.g, (*C.void)(unsafe.Pointer(&cIdx)))
 }
 
+func (t *STRTree) Query(geom *Geometry, cb STRTreeCallback)  {
+	cbid := register(cb)
+	ccbid := C.int(cbid)
+	cGEOSSTRtree_query(t.t, geom.g, (C.GEOSQueryCallback)(C.go_callback), (*C.void)(unsafe.Pointer(&ccbid)))
+	defer unregister(cbid)
+}
+
+// cgo callback
+// https://github.com/golang/go/wiki/cgo#function-variables
 //export go_callback
-func go_callback(item *C.void, userData *C.void) {
-	fmt.Printf("%v %v\n", item, userData)
+func go_callback(cIdx unsafe.Pointer, data unsafe.Pointer) {
+	goIdx := *(*int)(cIdx)
+	cbid := *(*C.int)(data)
+	cb := lookup(int(cbid))
+	cb(goIdx)
 }
 
-func (t *STRTree) Query(geom *Geometry) {
-	cstr := C.CString("DIDI")
-	defer C.free(unsafe.Pointer(cstr))
+type STRTreeCallback func(id int)
 
-	cb := (C.GEOSQueryCallback)(C.go_callback)
-	cGEOSSTRtree_query(t.t, geom.g, cb, (*C.void)(unsafe.Pointer(cstr)))
+var mu sync.Mutex
+var fns = make(map[int]STRTreeCallback)
+var cbIndex int
+
+func register(fn STRTreeCallback) int {
+	mu.Lock()
+	defer mu.Unlock()
+	cbIndex++
+
+	for fns[cbIndex] != nil {
+		cbIndex++
+	}
+
+	fns[cbIndex] = fn
+	return cbIndex
 }
 
-//
-//func cGEOSSTRtree_query(tree *C.GEOSSTRtree, g *C.GEOSGeometry, callback C.GEOSQueryCallback, userdata *C.void) {
-//	handlemu.Lock()
-//	defer handlemu.Unlock()
-//	C.GEOSSTRtree_query_r(handle, tree, g, callback, unsafe.Pointer(userdata))
-//}
-//
-//func cGEOSSTRtree_nearest(tree *C.GEOSSTRtree, geom *C.GEOSGeometry) *C.GEOSGeometry {
-//	handlemu.Lock()
-//	defer handlemu.Unlock()
-//	return C.GEOSSTRtree_nearest_r(handle, tree, geom)
-//}
-//
+func lookup(i int) STRTreeCallback {
+	mu.Lock()
+	defer mu.Unlock()
+	return fns[i]
+}
+
+func unregister(i int) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(fns, i)
+}
+
 //func cGEOSSTRtree_nearest_generic(tree *C.GEOSSTRtree, item *C.void, itemEnvelope *C.GEOSGeometry, distancefn C.GEOSDistanceCallback, userdata *C.void) {
 //	handlemu.Lock()
 //	defer handlemu.Unlock()
